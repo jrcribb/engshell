@@ -1,41 +1,26 @@
-from openai import OpenAI
-from colorama import Fore, Style
-import os
-import sys
-from prompts import *
-import subprocess
-import io
 import contextlib
+import getpass
+import io
+import os
 import platform
+import subprocess
+import sys
+from colorama import Fore, Style
+from openai import OpenAI
 
-MODEL = "gpt-4o-mini"
-
-# Get LLM server credentials
-API_KEY = os.environ.get("OPENROUTER_API_KEY")
-API_URL = "https://openrouter.ai/api/v1"
-if not API_KEY:
-    API_KEY = os.environ.get("OPENAI_API_KEY")
-    API_URL = "https://api.openai.com/v1"
-    if not API_KEY:
-        print("Please set your OpenRouter or OpenAI API key as an environment variable.")
-        sys.exit(1)
-
-openai_client = OpenAI(
-    api_key=API_KEY,
-    base_url=API_URL
-)
-
-def print_formatted(text, color=Fore.WHITE):
+def print_formatted(text: str, color: str = Fore.WHITE):
     print(f"{Style.RESET_ALL}{color}{text}{Style.RESET_ALL}")
 
-def clean_code(code):
-    between_code_tags = code.split('```')[1] if '```' in code else code.strip('`')
-    between_code_tags = between_code_tags.strip()
-    if between_code_tags.startswith("python"):
-        between_code_tags = between_code_tags[6:]
-    return between_code_tags.strip()
 
-def run_code(code):
+def extract_code(text: str):
+    code = text.split("```")[1] if "```" in text else text.strip("`")
+    code = code.strip()
+    if code.startswith("python"):
+        code = code[6:]
+    return code.strip()
+
+
+def run_code(code: str):
     print_formatted("Running code:", Fore.YELLOW)
     print_formatted(code, Fore.CYAN)
     try:
@@ -46,49 +31,89 @@ def run_code(code):
     except Exception as e:
         return False, f"Error: {type(e).__name__}: {str(e)}"
 
-def install_package(error):
-    package = error.split("'")[-2]
-    print_formatted(f"Installing {package}...", Fore.YELLOW)
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+def install_package(package_name: str):
+    print_formatted(f"Installing {package_name}...", Fore.YELLOW)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+
 
 def run_shell():
+    openai_client = OpenAI()
     memory = [
-        {"role": "system", "content": CODE_SYSTEM_CALIBRATION_MESSAGE},
+        {
+            "role": "system",
+            "content": str(
+                {
+                    "environment": {
+                        "username": getpass.getuser(),
+                        "os": platform.system(),
+                        "python_version": platform.python_version(),
+                    },
+                    "task": f"""Please write a full Python script for the user to accomplish their goal. 
+The script will be immediately run, so it should be ready to work without any modifications,
+Do not return any text that is not Python code.
+Import all needed requirements at the top of the script.
+Always use tqdm to show progress for any loops.
+Return the full code in ``` blocks.
+Print the final result if appropriate.
+When faced with errors, give the full entire corrected script.
+Never give explanations.""",
+                }
+            ),
+        },
     ]
 
     while True:
         user_input = input(f"{os.getcwd()} {Fore.CYAN}engshell>{Style.RESET_ALL} ")
-        
-        if user_input.lower() == 'clear':
+
+        if user_input.lower() in {"clear", "cls"}:
             os.system("cls" if platform.system() == "Windows" else "clear")
             memory = memory[:1]
             continue
 
-        memory.append({"role": "user", "content": USER_MESSAGE(user_input, os.getcwd())})
+        memory.append(
+            {
+                "role": "user",
+                "content": str({"goal": user_input, "cwd": os.getcwd()}),
+            }
+        )
 
         while True:
-            response = openai_client.chat.completions.create(model=MODEL, messages=memory)
+            response = openai_client.chat.completions.create(
+                model="gpt-4.1-mini", messages=memory # type: ignore
+            )
+            if not response.choices[0].message.content:
+                print_formatted("LLM did not return any content. Retrying...", Fore.YELLOW)
+                continue
             try:
-                code = clean_code(response.choices[0].message.content)
+                code = extract_code(response.choices[0].message.content)
             except Exception as e:
                 print(f"Error ({e}): LLM response: {response}")
                 exit()
             memory.append({"role": "assistant", "content": code})
 
             success, output = run_code(code)
-            
+
             if success:
                 print_formatted(output or "Code executed successfully.", Fore.GREEN)
                 break
-            elif "No module named" in output or "ImportError" in output:
-                install_package(output)
+            elif "ModuleNotFoundError: No module named" in output:
+                package_name = output.split("'")[-2]
+                if (
+                    input(
+                        f"{Fore.YELLOW}Install {package_name} package? [y/N]: {Style.RESET_ALL}"
+                    ).lower()
+                    == "y"
+                ):
+                    install_package(package_name)
             else:
                 print_formatted(output, Fore.RED)
-                memory.append({"role": "system", "content": DEBUG_MESSAGE(code, output)})
+                memory.append({"role": "system", "content": str({"error": output})})
 
         memory.append({"role": "system", "content": output})
 
+
 if __name__ == "__main__":
-    if os.name == 'nt':
-        os.system('')
+    if os.name == "nt":
+        os.system("")
     run_shell()
